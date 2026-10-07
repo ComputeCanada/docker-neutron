@@ -85,20 +85,91 @@ https://github.com/orgs/ComputeCanada/packages/container/docker-neutron/settings
 
 ## Deploying with Atmosphere
 
-Override only the image that needs the patch, pinned by digest:
+### 1. Allow the image in the Kyverno exception
 
-```yaml
-# atmo-config/<env>/cloud-config/inventory/group_vars/<env>/
-atmosphere_image_overrides:
-  neutron_ovn_metadata: ghcr.io/computecanada/docker-neutron:sha-<short>@sha256:<index digest>
+The kalpa clusters enforce the Pod Security `restricted` level through Kyverno,
+and the metadata agent (privileged, root init containers, `CHOWN`) only runs
+because of a `PolicyException` whose controls are scoped by image. Without our
+image in it, the first replacement pod is rejected and the rollout stalls with
+that node's agent gone:
+
+```
+admission webhook "validate.kyverno.svc-fail" denied the request: ...
+  violates PodSecurity "restricted:" ... runAsNonRoot != true ... privileged ...
 ```
 
-The `ovn_metadata_agent` DaemonSet rolls 10% at a time. Restarting an agent
-kills its haproxies, and VMs on that node lose metadata for a few seconds
-while it resyncs. Roll to kalpa-dev first.
+In `ubernetes-applications`, add `ghcr.io/computecanada/docker-neutron:*`
+after **every** `registry.atmosphere.dev/library/neutron:*` line in
+`environments/metal/kalpa/default/addons/kyverno/policies/exceptions/openstack/neutron/neutron-ovn-metadata-agent-default-exception.yaml`
+(nine of them: Seccomp x2, Capabilities, Privileged Containers, Privilege
+Escalation x2, Running as Non-root x2, Running as Non-root user). Missing one
+control fails the same way. The file is shared by kalpa-dev and kalpa-prod;
+merge it and let Argo CD sync before deploying the image.
 
-Afterwards every generated config on a node should have `nbthread 2` and every
-haproxy should run 2 threads:
+If a rollout did stall, it resumes on its own once the exception syncs, but the
+DaemonSet controller backs off failed creates for up to ~16 minutes. Touching
+the DaemonSet's metadata retries immediately without changing the pod template:
+
+```sh
+kubectl -n openstack annotate ds neutron-ovn-metadata-agent-default retry-trigger="$(date +%s)" --overwrite
+kubectl -n openstack annotate ds neutron-ovn-metadata-agent-default retry-trigger-
+```
+
+### 2. Override the image in atmo-config
+
+The key is **`neutron_metadata`**, not `neutron_ovn_metadata`. Atmosphere
+defines both, but the chart's `daemonset-ovn-metadata-agent.yaml` renders all
+three of its neutron containers from `images.tags.neutron_metadata`; nothing
+reads `neutron_ovn_metadata`, so overriding it produces a new Helm revision
+and no pod changes. (`neutron_metadata` is also used by the OVS
+`daemonset-metadata-agent.yaml`, which is disabled on OVN clouds.)
+
+Add it to the existing `atmosphere_image_overrides` in
+`common/cloud-config/inventory/group_vars/all/all.yml`, pinned by digest. Do
+not define `atmosphere_image_overrides` again under an environment's
+group_vars: Ansible replaces dicts rather than merging them, so it would drop
+every other override for that environment.
+
+```yaml
+atmosphere_image_overrides:
+  # ...existing overrides...
+  neutron_metadata: ghcr.io/computecanada/docker-neutron:sha-<short>@sha256:<index digest>
+```
+
+To roll it to one environment first, deploy only that environment from the
+branch carrying the change:
+
+```sh
+cd atmo-config/kalpa-dev/cloud-config
+ansible-playbook -D -u root -i inventory/hosts.ini vexxhost.atmosphere.openstack -t neutron
+```
+
+The playbook re-renders the whole neutron release from the collection's image
+pins, so run it with the same `vexxhost.atmosphere` version that last deployed
+the environment; otherwise neutron-server and the other agents move too. In
+the `-D` output the only image change should be `neutron_metadata`.
+
+### 3. Roll out
+
+The `ovn_metadata_agent` DaemonSet rolls 10% at a time (`max_unavailable` in
+atmo-config's `neutron_helm_values`). For a one-off faster rollout, patch the
+live DaemonSet; the next neutron deploy resets it:
+
+```sh
+kubectl -n openstack patch ds neutron-ovn-metadata-agent-default --type merge \
+  -p '{"spec":{"updateStrategy":{"rollingUpdate":{"maxUnavailable":4}}}}'
+```
+
+Restarting an agent kills its haproxies, and VMs on that node lose metadata for
+a few seconds while it resyncs; the resync also provisions any network that
+failed earlier. VMs that already booted without metadata still need a reboot
+(or rebuild) for cloud-init to fetch their SSH keys.
+
+### 4. Verify
+
+There is one haproxy per network with a VM on the node, each in an
+`ovnmeta-<network id>` namespace. Every generated config should have
+`nbthread 2` and every haproxy should run 2 threads:
 
 ```sh
 pod=$(kubectl -n openstack get pods -o wide --no-headers \
@@ -108,9 +179,16 @@ kubectl -n openstack exec $pod -- sh -c \
    for p in $(pgrep -x haproxy); do ls /proc/$p/task | wc -l; done | sort | uniq -c'
 ```
 
+On kalpa-dev (2026-10-07) a node with 5 networks went from 5 x 64 haproxy
+threads and 334 pod PIDs to 5 x 2 threads and 25 PIDs.
+
+End to end, boot a VM with a key pair and SSH in. The agent on its node logs
+the fetch, including `GET /latest/meta-data/public-keys/0/openssh-key ...
+status: 200`.
+
 ## Keeping `FROM` in step with Atmosphere
 
-`FROM` must be the image Atmosphere deploys for `neutron_ovn_metadata`, by
+`FROM` must be the image Atmosphere deploys for `neutron_metadata`, by
 digest. Do not track the moving `2024.2` tag: it is rebuilt between Atmosphere
 releases and would put the metadata agent on a different neutron than the rest
 of the deployment.

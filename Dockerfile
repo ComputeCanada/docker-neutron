@@ -1,6 +1,6 @@
 # Atmosphere's neutron image with downstream patches from patches/ applied.
 #
-# FROM must be the image Atmosphere deploys for neutron_ovn_metadata (see
+# FROM must be the image Atmosphere deploys for neutron_metadata (see
 # README, "Keeping FROM in step with Atmosphere"). It is a multi-arch index, so
 # each --platform picks the matching variant.
 ARG FROM=registry.atmosphere.dev/library/neutron:2024.2@sha256:e380efa91bab16ad959b9898f90936e099b31dcb1a3bf726e82b34bb77364252
