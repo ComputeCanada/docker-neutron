@@ -1,0 +1,47 @@
+From 0a044ce38407d9ac196bc3fabdc16acf8fbb29fa Mon Sep 17 00:00:00 2001
+From: Miro Tomaska <mtomaska@redhat.com>
+Date: Fri, 25 Jul 2025 15:18:17 -0400
+Subject: [PATCH] Set haproxy nbthread[1] to 2
+
+The haproxy that gets spawned by agents can cause `too many open files`
+exceptions on very large deployments. Since haproxy is not resource
+intensive process, we can limit it to only use 2 threads to mitigate
+this issue.
+
+[1] www.haproxy.com/documentation/haproxy-configuration-manual/latest/#nbthread
+Closes-bug: #2120668
+Change-Id: I70b2461d65f3e9967bea1239eac3c1ccb52b3138
+Signed-off-by: Miro Tomaska <mtomaska@redhat.com>
+---
+ neutron/common/metadata.py                                | 1 +
+ releasenotes/notes/haproxy-nbthread-a658040c98639b47.yaml | 8 ++++++++
+ 2 files changed, 9 insertions(+)
+ create mode 100644 releasenotes/notes/haproxy-nbthread-a658040c98639b47.yaml
+
+diff --git a/neutron/common/metadata.py b/neutron/common/metadata.py
+index 7fe08180718..f206df43a8d 100644
+--- a/neutron/common/metadata.py
++++ b/neutron/common/metadata.py
+@@ -45,6 +45,7 @@ class InvalidUserOrGroupException(Exception):
+     user        %(user)s
+     group       %(group)s
+     maxconn     1024
++    nbthread    2
+     pidfile     %(pidfile)s
+     daemon
+ 
+diff --git a/releasenotes/notes/haproxy-nbthread-a658040c98639b47.yaml b/releasenotes/notes/haproxy-nbthread-a658040c98639b47.yaml
+new file mode 100644
+index 00000000000..ee47fcb3666
+--- /dev/null
++++ b/releasenotes/notes/haproxy-nbthread-a658040c98639b47.yaml
+@@ -0,0 +1,8 @@
++---
++fixes:
++  - |
++    Limit the number of threads used by the metadata haproxy service to 2 using
++    the nbthread configuration. This prevents haproxy from spreading across many
++    threads when the process lacks other restrictions like CPU affinity.
++    For more information, see bug
++    `2120668 <https://bugs.launchpad.net/neutron/+bug/2120668>`_.
+\ No newline at end of file

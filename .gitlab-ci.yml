@@ -1,0 +1,66 @@
+stages:
+  - build
+
+# Built for linux/amd64 and linux/arm64 and published as a manifest list, so a
+# mixed-arch cluster pulls the right variant from the same tag.
+#
+# Unlike docker-openvswitch, the build itself never executes target-arch code
+# (patching runs on the build platform and the final stage has no RUN), so an
+# arm64 build is fast. The smoke test does run arm64 binaries, though, so qemu
+# binfmt handlers are still needed on the runner host -- see
+# docker-openvswitch's README, "binfmt is a host requirement".
+build:
+  stage: build
+  image: quay.io/buildah/stable
+  tags:
+    - k8s
+  timeout: 1h
+  variables:
+    STORAGE_DRIVER: vfs
+    BUILDAH_FORMAT: docker
+    PLATFORMS: linux/amd64,linux/arm64
+    # Deliberately NOT the registry tag; see docker-openvswitch's .gitlab-ci.yml.
+    MANIFEST: neutron-build-manifest
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | buildah login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+    # Fail early if the host cannot emulate arm64 for the smoke test. This has
+    # to run something: /proc/sys/fs/binfmt_misc is not mounted in the job.
+    - |
+      case "$PLATFORMS" in
+        *linux/arm64*)
+          probe=$(buildah from --quiet --platform linux/arm64 alpine:3 2>/dev/null) || true
+          if [ -z "$probe" ] || ! buildah run "$probe" -- uname -m 2>/dev/null | grep -q aarch64; then
+            echo "ERROR: cannot execute arm64 binaries on this runner."
+            echo "Register qemu binfmt handlers on the runner HOST; see README."
+            exit 1
+          fi
+          buildah rm "$probe" >/dev/null
+          echo "arm64 emulation available"
+          ;;
+      esac
+  script:
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        export FQ_IMAGE_NAME="$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+      else
+        export FQ_IMAGE_NAME="$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+      fi
+    - buildah manifest rm "$MANIFEST" 2>/dev/null || true
+    - |
+      buildah build \
+        --platform "$PLATFORMS" \
+        --manifest "$MANIFEST" \
+        .
+    # Nothing is published until every arch proves the patch reached the
+    # neutron that Python imports and haproxy honours it.
+    - |
+      for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
+        ./ci/smoke-test.sh --platform "$platform" "$MANIFEST"
+      done
+    - buildah manifest inspect "$MANIFEST"
+    - buildah manifest push --all "$MANIFEST" "docker://$FQ_IMAGE_NAME"
+    # Immutable tag to deploy from; the ref-slug tag above moves.
+    - buildah manifest push --all "$MANIFEST" "docker://$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH
