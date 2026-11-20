@@ -3,8 +3,8 @@
 # FROM must be the image Atmosphere deploys for neutron_metadata (see
 # README, "Keeping FROM in step with Atmosphere"). It is a multi-arch index, so
 # each --platform picks the matching variant.
-ARG FROM=registry.atmosphere.dev/library/neutron:2024.2@sha256:e380efa91bab16ad959b9898f90936e099b31dcb1a3bf726e82b34bb77364252
-ARG SITE_PACKAGES=/var/lib/openstack/lib/python3.10/site-packages
+ARG FROM=ghcr.io/vexxhost/neutron:2024.2@sha256:f06cc5ad53c62c76e90053f256046940b3237ee6ac07fd53b4e45b18c0a65ee7
+ARG SITE_PACKAGES=/var/lib/openstack/lib/python3.12/site-packages
 
 FROM ${FROM} AS base
 
